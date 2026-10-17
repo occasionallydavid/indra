@@ -1,16 +1,27 @@
 [package]
 name = "indra-ocr"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 description = "Fast CPU OCR inference for Indra, compiled to native Burn code"
 license = "Apache-2.0"
+
+[features]
+default = ["png", "jpeg"]
+cjk = []
+math = []
+png = ["image/png"]
+jpeg = ["image/jpeg"]
+webp = ["image/webp"]
+tiff = ["image/tiff"]
+bmp = ["image/bmp"]
+gif = ["image/gif"]
 
 [dependencies]
 anyhow = "1.0"
 burn = { version = "0.22.0", default-features = false, features = ["std", "flex", "simd", "rayon"] }
 burn-store = { version = "0.22.0", default-features = false, features = ["std"] }
 clap = { version = "4.5", features = ["derive"] }
-image = "0.25"
+image = { version = "0.25", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"

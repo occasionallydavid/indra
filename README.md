@@ -4,11 +4,13 @@ Inference-only Rust port of Indra OCR. At build time,
 [`burn-onnx`](https://github.com/tracel-ai/burn-onnx) converts all ten exported
 ONNX graphs into native [Burn](https://burn.dev) code and Burnpack weights. The
 release binary embeds those weights and no longer needs ONNX Runtime, `ort`, or
-the model directory at runtime.
+the model directory at runtime. PNG and JPEG are enabled by default; CJK, math,
+WebP, TIFF, BMP, and GIF are optional Cargo features.
 
-The port includes line detection, CTC recognition, CJK routing, orientation and
-deskew, reading order, layout blocks, Markdown tables, and optional LaTeX math
-recognition. It contains no training code or model-authoring paths.
+The port includes line detection, CTC recognition, orientation and deskew,
+reading order, layout blocks, and Markdown tables. CJK routing and LaTeX math
+recognition are optional features. It contains no training code or
+model-authoring paths.
 
 PDF rendering and PDF text-layer extraction are not included in this port.
 
@@ -30,12 +32,19 @@ each file with SHA-256. It does not use `hf-hub`.
 target/release/indra-ocr scan.png
 target/release/indra-ocr scan.jpg --format text
 target/release/indra-ocr page.png --format json --timings
+cargo build --release --features math
 target/release/indra-ocr page.png --math
 target/release/indra-ocr page.png --table-heads
 target/release/indra-ocr *.png --out results/
+cargo build --release --features webp,tiff
+cargo build --release --features cjk
 ```
 
 Output formats are Markdown, plain text, and JSON.
+
+The default PNG/JPEG build embeds only the base detection, recognition, order,
+and orientation models and is about 18 MiB. Enable `cjk` for the 9.8 MiB Chinese
+recognizer or `math` for the roughly 21 MiB math models.
 
 See [RUST.md](RUST.md) for library usage and implementation details.
 

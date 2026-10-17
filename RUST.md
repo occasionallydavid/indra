@@ -6,9 +6,9 @@ ONNX graphs into native Burn modules during the build. The resulting binary
 contains no ONNX parser or ONNX Runtime and has no training, targets, losses, or
 model-authoring paths.
 
-The Rust CLI accepts image input. The `image` crate supplies PNG, JPEG, WebP,
-TIFF, BMP, GIF, PNG, PNM, QOI, and other common image formats. PDF rendering and
-the PDF text-layer path are intentionally not included.
+The Rust CLI accepts image input. PNG and JPEG are enabled by default. CJK, WebP,
+TIFF, BMP, and GIF can be enabled with Cargo features. PDF rendering and the PDF
+text-layer path are intentionally not included.
 
 ## Build and download models
 
@@ -31,9 +31,11 @@ inputs: the build writes generated Rust and Burnpack weight modules to Cargo's
 target/release/indra-ocr scan.png
 target/release/indra-ocr scan.jpg --format text
 target/release/indra-ocr page.png --format json --timings
+cargo build --release --features math
 target/release/indra-ocr page.png --math
 target/release/indra-ocr page.png --table-heads
 target/release/indra-ocr *.png --out results/
+cargo build --release --features cjk
 ```
 
 Output formats are `md`, `text`, and `json`. JSON includes line boxes,
@@ -53,9 +55,11 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-`Ocr::enable_math()` loads the optional math classifier and attention decoder.
-CJK routing and page orientation are enabled automatically when `script.onnx`,
-`rec_cjk.onnx`, and `orient.onnx` are present.
+`Ocr::enable_math()` loads the classifier and attention decoder when the crate
+is built with the `math` feature. This avoids embedding roughly 21 MiB of math
+weights in binaries that do not use them. CJK routing is likewise opt-in with
+the `cjk` feature, avoiding its 9.8 MiB recognizer in the default build. Page
+orientation is always included.
 
 ## Native model generation
 
@@ -67,8 +71,8 @@ codegen type mismatch in `math_enc`.
 The compile-time input folder contains:
 
 - `det.onnx`, `rec.onnx`, `order.onnx`, `meta.json`
-- `orient.onnx`, `script.onnx`, `rec_cjk.onnx`
+- `orient.onnx`, plus `script.onnx` and `rec_cjk.onnx` when building with `cjk`
 - `mathcls.onnx`, `math_enc.onnx`, `math_dec_init.onnx`,
-  `math_dec_step.onnx`, `math_meta.json`
+  `math_dec_step.onnx`, `math_meta.json`, only when building with `math`
 
 The model version and filenames are pinned in `scripts/download-models.sh`.

@@ -5,6 +5,7 @@
 
 pub mod image_ops;
 pub mod layout;
+#[cfg(feature = "math")]
 pub mod math;
 pub mod model;
 pub mod order;

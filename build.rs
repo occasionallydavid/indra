@@ -54,17 +54,27 @@ impl OpOverride for ClipOverride {
 
 fn main() {
     println!("cargo:rerun-if-changed=models");
-    ModelGen::new()
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CJK");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_MATH");
+    let mut generator = ModelGen::new();
+    generator
         .input("models/det.onnx")
         .input("models/rec.onnx")
         .input("models/order.onnx")
-        .input("models/orient.onnx")
-        .input("models/script.onnx")
-        .input("models/rec_cjk.onnx")
-        .input("models/mathcls.onnx")
-        .input("models/math_enc.onnx")
-        .input("models/math_dec_init.onnx")
-        .input("models/math_dec_step.onnx")
+        .input("models/orient.onnx");
+    if std::env::var_os("CARGO_FEATURE_CJK").is_some() {
+        generator
+            .input("models/script.onnx")
+            .input("models/rec_cjk.onnx");
+    }
+    if std::env::var_os("CARGO_FEATURE_MATH").is_some() {
+        generator
+            .input("models/mathcls.onnx")
+            .input("models/math_enc.onnx")
+            .input("models/math_dec_init.onnx")
+            .input("models/math_dec_step.onnx");
+    }
+    generator
         .load_strategy(LoadStrategy::Embedded)
         .register_op_override(ClipOverride)
         .out_dir("models/")

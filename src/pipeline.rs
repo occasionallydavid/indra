@@ -12,8 +12,11 @@ use crate::image_ops::{
     resize_gray, rotate_f32_constant, rotate_gray_replicate, rotate_quarter_turns_clockwise,
 };
 use crate::layout::{Block as LayoutBlock, page_blocks, page_markdown};
+#[cfg(feature = "math")]
 use crate::math::{MATH_MIN_CONF, MathReader};
-use crate::model::{det, order as order_model, orient, rec, rec_cjk, script};
+use crate::model::{det, order as order_model, orient, rec};
+#[cfg(feature = "cjk")]
+use crate::model::{rec_cjk, script};
 use crate::order::{
     Box4, Layout, N_FEATS, decode_blocks_order, line_features, median, order_xycut,
 };
@@ -106,6 +109,7 @@ impl RecModel for rec::Model {
     }
 }
 
+#[cfg(feature = "cjk")]
 impl RecModel for rec_cjk::Model {
     fn forward_ocr(
         &self,
@@ -162,6 +166,7 @@ struct Meta {
     det_long_side: usize,
     rec_height: usize,
     vocab: String,
+    #[cfg(feature = "cjk")]
     vocab_cjk: Option<String>,
 }
 
@@ -175,12 +180,16 @@ pub struct Ocr {
     device: Device,
     det: det::Model,
     rec: rec::Model,
+    #[cfg(feature = "cjk")]
     script: Option<script::Model>,
+    #[cfg(feature = "cjk")]
     rec_cjk: Option<rec_cjk::Model>,
     order: Option<order_model::Model>,
     orient: Option<orient::Model>,
     vocab: Vocab,
+    #[cfg(feature = "cjk")]
     vocab_cjk: Option<Vocab>,
+    #[cfg(feature = "math")]
     math: Option<MathReader>,
     det_long_side: usize,
     rec_height: usize,
@@ -194,6 +203,7 @@ impl Ocr {
         let meta: Meta = serde_json::from_str(include_str!("../models/meta.json"))
             .context("invalid meta.json")?;
         let vocab = Vocab::from_json(&meta.vocab).context("invalid main vocabulary")?;
+        #[cfg(feature = "cjk")]
         let vocab_cjk = meta
             .vocab_cjk
             .as_deref()
@@ -204,12 +214,16 @@ impl Ocr {
         Ok(Self {
             det: det::Model::from_embedded(&device),
             rec: rec::Model::from_embedded(&device),
+            #[cfg(feature = "cjk")]
             script: Some(script::Model::from_embedded(&device)),
+            #[cfg(feature = "cjk")]
             rec_cjk: Some(rec_cjk::Model::from_embedded(&device)),
             order: Some(order_model::Model::from_embedded(&device)),
             orient: Some(orient::Model::from_embedded(&device)),
             vocab,
+            #[cfg(feature = "cjk")]
             vocab_cjk,
+            #[cfg(feature = "math")]
             math: None,
             device,
             det_long_side: meta.det_long_side,
@@ -236,8 +250,15 @@ impl Ocr {
     }
 
     pub fn enable_math(&mut self) -> Result<()> {
-        self.math = Some(MathReader::load(&self.device)?);
-        Ok(())
+        #[cfg(feature = "math")]
+        {
+            self.math = Some(MathReader::load(&self.device)?);
+            Ok(())
+        }
+        #[cfg(not(feature = "math"))]
+        {
+            anyhow::bail!("this binary was built without the `math` Cargo feature")
+        }
     }
 
     pub fn ocr_image(&mut self, image: &GrayImage, orient: bool) -> Result<Page> {
@@ -322,11 +343,15 @@ impl Ocr {
             return Ok(Vec::new());
         }
         let mut out = vec![Recognition::empty(); crops.len()];
-        let hanzi = if let Some(script) = self.script.as_ref() {
-            Self::hanzi_lines(script, &crops, self.batch, &self.device)?
-        } else {
-            vec![false; crops.len()]
-        };
+        #[cfg(feature = "cjk")]
+        let hanzi = Self::hanzi_lines(
+            self.script.as_ref().unwrap(),
+            &crops,
+            self.batch,
+            &self.device,
+        )?;
+        #[cfg(not(feature = "cjk"))]
+        let hanzi = vec![false; crops.len()];
         let non_cjk: Vec<usize> = (0..crops.len()).filter(|&index| !hanzi[index]).collect();
         Self::recognize_group(
             &self.rec,
@@ -339,6 +364,7 @@ impl Ocr {
             &self.device,
             &mut out,
         )?;
+        #[cfg(feature = "cjk")]
         if let (Some(model), Some(vocab)) = (self.rec_cjk.as_ref(), self.vocab_cjk.as_ref()) {
             let cjk: Vec<usize> = (0..crops.len()).filter(|&index| hanzi[index]).collect();
             Self::recognize_group(
@@ -353,6 +379,7 @@ impl Ocr {
                 &mut out,
             )?;
         }
+        #[cfg(feature = "math")]
         if let Some(math) = self.math.as_mut() {
             let flags = math.flags(&crops, self.batch)?;
             let indices: Vec<usize> = flags
@@ -481,6 +508,7 @@ impl Ocr {
         Ok(())
     }
 
+    #[cfg(feature = "cjk")]
     fn hanzi_lines(
         model: &script::Model,
         crops: &[crate::preprocess::LineCrop],
