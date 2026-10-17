@@ -1,14 +1,16 @@
 [package]
 name = "indra-ocr"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 description = "Fast CPU OCR inference for Indra, compiled to native Burn code"
 license = "Apache-2.0"
 
 [features]
-default = ["png", "jpeg"]
+default = ["png", "jpeg", "cli"]
+cli = ["dep:clap"]
 cjk = []
 math = []
+wasm = ["dep:wasm-bindgen", "dep:console_error_panic_hook"]
 png = ["image/png"]
 jpeg = ["image/jpeg"]
 webp = ["image/webp"]
@@ -18,13 +20,22 @@ gif = ["image/gif"]
 
 [dependencies]
 anyhow = "1.0"
-burn = { version = "0.22.0", default-features = false, features = ["std", "flex", "simd", "rayon"] }
 burn-store = { version = "0.22.0", default-features = false, features = ["std"] }
-clap = { version = "4.5", features = ["derive"] }
-image = { version = "0.25", default-features = false }
+console_error_panic_hook = { version = "0.1", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
+wasm-bindgen = { version = "0.2", optional = true }
+web-time = "1.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+burn = { version = "0.22.0", default-features = false, features = ["std", "flex", "simd", "rayon"] }
+clap = { version = "4.5", features = ["derive"], optional = true }
+image = { version = "0.25", default-features = false }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+burn = { version = "0.22.0", default-features = false, features = ["std", "flex", "simd"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [build-dependencies]
 burn-onnx = { version = "0.22.0", default-features = false, features = ["import"] }
@@ -33,3 +44,11 @@ onnx-ir = "0.22.0"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "indra-ocr"
+path = "src/main.rs"
+required-features = ["cli"]

@@ -1,5 +1,4 @@
-use image::{GrayImage, Luma};
-
+use crate::frame::GrayFrame;
 use crate::image_ops::{resize_f32, resize_gray};
 
 pub const INPUT_MULTIPLE: usize = 32;
@@ -24,13 +23,13 @@ pub struct PageInput {
     pub scale: f32,
 }
 
-pub fn page_to_input(gray: &GrayImage, long_side: usize) -> PageInput {
-    let (h, w) = (gray.height() as usize, gray.width() as usize);
+pub fn page_to_input(gray: &GrayFrame, long_side: usize) -> PageInput {
+    let (h, w) = (gray.height(), gray.width());
     let scale = long_side as f32 / h.max(w) as f32;
     let nh = ((h as f32 * scale).round() as usize).max(1);
     let nw = ((w as f32 * scale).round() as usize).max(1);
     let resized = if (nh, nw) != (h, w) {
-        resize_gray(gray, nw as u32, nh as u32)
+        resize_gray(gray, nw, nh)
     } else {
         gray.clone()
     };
@@ -39,7 +38,7 @@ pub fn page_to_input(gray: &GrayImage, long_side: usize) -> PageInput {
     let mut out = vec![0.0; ph * pw];
     for y in 0..nh {
         for x in 0..nw {
-            out[y * pw + x] = 1.0 - resized.get_pixel(x as u32, y as u32)[0] as f32 / 255.0;
+            out[y * pw + x] = 1.0 - resized.get(x, y) as f32 / 255.0;
         }
     }
     PageInput {
@@ -50,7 +49,7 @@ pub fn page_to_input(gray: &GrayImage, long_side: usize) -> PageInput {
     }
 }
 
-pub fn crop_line(gray: &GrayImage, bbox: [f32; 4], height: usize, max_width: usize) -> LineCrop {
+pub fn crop_line(gray: &GrayFrame, bbox: [f32; 4], height: usize, max_width: usize) -> LineCrop {
     let [x0, y0, x1, y1] = bbox;
     let h = (y1 - y0).max(1.0);
     let pad_x0 = x0 - PAD_X * h;
@@ -61,9 +60,9 @@ pub fn crop_line(gray: &GrayImage, bbox: [f32; 4], height: usize, max_width: usi
     let iy0 = pad_y0.floor() as i32;
     let ix1 = pad_x1.ceil() as i32;
     let iy1 = pad_y1.ceil() as i32;
-    let cw = (ix1 - ix0).max(1) as u32;
-    let ch = (iy1 - iy0).max(1) as u32;
-    let mut crop = GrayImage::from_pixel(cw, ch, Luma([255]));
+    let cw = (ix1 - ix0).max(1) as usize;
+    let ch = (iy1 - iy0).max(1) as usize;
+    let mut crop = GrayFrame::new(cw, ch, 255);
     let (pw, ph) = (gray.width() as i32, gray.height() as i32);
     let sx0 = ix0.max(0);
     let sy0 = iy0.max(0);
@@ -72,21 +71,21 @@ pub fn crop_line(gray: &GrayImage, bbox: [f32; 4], height: usize, max_width: usi
     if sx1 > sx0 && sy1 > sy0 {
         for sy in sy0..sy1 {
             for sx in sx0..sx1 {
-                crop.put_pixel(
-                    (sx - ix0) as u32,
-                    (sy - iy0) as u32,
-                    *gray.get_pixel(sx as u32, sy as u32),
+                crop.set(
+                    (sx - ix0) as usize,
+                    (sy - iy0) as usize,
+                    gray.get(sx as usize, sy as usize),
                 );
             }
         }
     }
     let out_w =
         ((cw as f32 * height as f32 / ch as f32).round() as usize).clamp(WIDTH_MULTIPLE, max_width);
-    let resized = resize_gray(&crop, out_w as u32, height as u32);
+    let resized = resize_gray(&crop, out_w, height);
     let mut data = vec![0.0; out_w * height];
     for y in 0..height {
         for x in 0..out_w {
-            data[y * out_w + x] = 1.0 - resized.get_pixel(x as u32, y as u32)[0] as f32 / 255.0;
+            data[y * out_w + x] = 1.0 - resized.get(x, y) as f32 / 255.0;
         }
     }
     LineCrop {

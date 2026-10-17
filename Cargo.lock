@@ -1335,6 +1335,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "const-random"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3418,18 +3428,22 @@ dependencies = [
 
 [[package]]
 name = "indra-ocr"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "burn",
  "burn-onnx",
  "burn-store",
  "clap",
+ "console_error_panic_hook",
+ "getrandom 0.4.3",
  "image",
  "onnx-ir",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "wasm-bindgen",
+ "web-time",
 ]
 
 [[package]]
@@ -6293,7 +6307,7 @@ version = "2.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 dependencies = [
- "rand 0.9.5",
+ "rand 0.10.3",
 ]
 
 [[package]]

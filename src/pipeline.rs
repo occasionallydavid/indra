@@ -1,13 +1,15 @@
 use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use burn::prelude::*;
 use burn::tensor::{Bool, Int, TensorData};
-use image::GrayImage;
 use serde::Serialize;
+use web_time::Instant;
 
+use crate::frame::GrayFrame;
 use crate::image_ops::{
     resize_gray, rotate_f32_constant, rotate_gray_replicate, rotate_quarter_turns_clockwise,
 };
@@ -244,6 +246,10 @@ impl Ocr {
         self
     }
 
+    pub fn set_batch(&mut self, batch: usize) {
+        self.batch = batch.max(1);
+    }
+
     pub fn with_table_heads(mut self, table_heads: bool) -> Self {
         self.table_heads = table_heads;
         self
@@ -261,7 +267,7 @@ impl Ocr {
         }
     }
 
-    pub fn ocr_image(&mut self, image: &GrayImage, orient: bool) -> Result<Page> {
+    pub fn ocr_image(&mut self, image: &GrayFrame, orient: bool) -> Result<Page> {
         let mut timings = Timing::new();
         let start = Instant::now();
         let (upright, turns, skew) = self.upright(image, orient)?;
@@ -276,7 +282,7 @@ impl Ocr {
         timings.insert("rec_ms".into(), elapsed_ms(start.elapsed()));
 
         let mut page = self.assemble(
-            (upright.width() as usize, upright.height() as usize),
+            (upright.width(), upright.height()),
             &boxes,
             recognition,
             timings,
@@ -295,7 +301,7 @@ impl Ocr {
         Ok(page)
     }
 
-    fn detect(&mut self, gray: &GrayImage) -> Result<Vec<Detection>> {
+    fn detect(&mut self, gray: &GrayFrame) -> Result<Vec<Detection>> {
         let (mut boxes, mut scale) = self.detect_at(gray, self.det_long_side)?;
         if self.adaptive && boxes.len() >= 8 {
             let heights: Vec<f32> = boxes.iter().map(|b| b.bbox.height()).collect();
@@ -322,7 +328,7 @@ impl Ocr {
         Ok(boxes)
     }
 
-    fn detect_at(&mut self, gray: &GrayImage, long_side: usize) -> Result<(Vec<Detection>, f32)> {
+    fn detect_at(&mut self, gray: &GrayFrame, long_side: usize) -> Result<(Vec<Detection>, f32)> {
         let input = page_to_input(gray, long_side);
         let tensor = tensor_f32(
             input.data,
@@ -333,7 +339,7 @@ impl Ocr {
         Ok((decode_detection(&output, shape[2], shape[3]), input.scale))
     }
 
-    fn recognize(&mut self, gray: &GrayImage, boxes: &[Detection]) -> Result<Vec<Recognition>> {
+    fn recognize(&mut self, gray: &GrayFrame, boxes: &[Detection]) -> Result<Vec<Recognition>> {
         let bboxes: Vec<[f32; 4]> = boxes.iter().map(|b| b.bbox.as_array()).collect();
         let crops: Vec<_> = bboxes
             .iter()
@@ -534,7 +540,7 @@ impl Ocr {
         Ok(out)
     }
 
-    fn orientation(&mut self, gray: &GrayImage) -> Result<usize> {
+    fn orientation(&mut self, gray: &GrayFrame) -> Result<usize> {
         let Some(orient) = self.orient.as_ref() else {
             return Ok(0);
         };
@@ -550,7 +556,7 @@ impl Ocr {
         })
     }
 
-    fn upright(&mut self, gray: &GrayImage, orient: bool) -> Result<(GrayImage, usize, f32)> {
+    fn upright(&mut self, gray: &GrayFrame, orient: bool) -> Result<(GrayFrame, usize, f32)> {
         let turns = if orient { self.orientation(gray)? } else { 0 };
         let mut upright = rotate_quarter_turns_clockwise(gray.clone(), turns);
         let mut skew = estimate_skew(&upright);
@@ -834,19 +840,21 @@ impl Ocr {
     }
 }
 
-pub fn load_image(path: impl AsRef<Path>) -> Result<GrayImage, InputError> {
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_image(path: impl AsRef<Path>) -> Result<GrayFrame, InputError> {
     let path = path.as_ref();
     if !path.is_file() {
         return Err(InputError(format!("{}: no such file", path.display())));
     }
-    image::open(path)
-        .map(|image| image.into_luma8())
-        .map_err(|error| {
-            InputError(format!(
-                "{}: not a readable image ({error})",
-                path.display()
-            ))
-        })
+    let image = image::open(path).map_err(|error| {
+        InputError(format!(
+            "{}: not a readable image ({error})",
+            path.display()
+        ))
+    })?;
+    let luma = image.into_luma8();
+    let (width, height) = (luma.width() as usize, luma.height() as usize);
+    Ok(GrayFrame::from_gray(width, height, luma.into_raw()))
 }
 
 fn decode_detection(output: &[f32], height: usize, width: usize) -> Vec<Detection> {
@@ -921,31 +929,30 @@ fn sigmoid(value: f32) -> f32 {
     1.0 / (1.0 + (-value).exp())
 }
 
-fn orient_input(gray: &GrayImage) -> (Vec<f32>, usize, usize) {
-    let (h, w) = (gray.height() as usize, gray.width() as usize);
+fn orient_input(gray: &GrayFrame) -> (Vec<f32>, usize, usize) {
+    let (h, w) = (gray.height(), gray.width());
     let scale = ORIENT_SIDE as f32 / h.max(w) as f32;
     let nh = ((h as f32 * scale).round() as usize).max(1);
     let nw = ((w as f32 * scale).round() as usize).max(1);
-    let resized = resize_gray(gray, nw as u32, nh as u32);
+    let resized = resize_gray(gray, nw, nh);
     let mut out = vec![0.0; ORIENT_SIDE * ORIENT_SIDE];
     for y in 0..nh {
         for x in 0..nw {
-            out[y * ORIENT_SIDE + x] =
-                1.0 - resized.get_pixel(x as u32, y as u32)[0] as f32 / 255.0;
+            out[y * ORIENT_SIDE + x] = 1.0 - resized.get(x, y) as f32 / 255.0;
         }
     }
     (out, nw, nh)
 }
 
-pub fn estimate_skew(gray: &GrayImage) -> f32 {
+pub fn estimate_skew(gray: &GrayFrame) -> f32 {
     over_thumbnail(gray, 800, |small| {
-        let width = small.width() as usize;
-        let height = small.height() as usize;
+        let width = small.width();
+        let height = small.height();
         let mut ink = vec![0.0; width * height];
         let mut sum = 0.0_f64;
         for y in 0..height {
             for x in 0..width {
-                let value = 1.0 - small.get_pixel(x as u32, y as u32)[0] as f32 / 255.0;
+                let value = 1.0 - small.get(x, y) as f32 / 255.0;
                 ink[y * width + x] = value;
                 sum += value as f64;
             }
@@ -993,10 +1000,10 @@ pub fn estimate_skew(gray: &GrayImage) -> f32 {
     })
 }
 
-fn over_thumbnail<T>(gray: &GrayImage, side: usize, f: impl FnOnce(&GrayImage) -> T) -> T {
+fn over_thumbnail<T>(gray: &GrayFrame, side: usize, f: impl FnOnce(&GrayFrame) -> T) -> T {
     let scale = side as f32 / gray.width().max(gray.height()) as f32;
-    let width = ((gray.width() as f32 * scale).round() as u32).max(1);
-    let height = ((gray.height() as f32 * scale).round() as u32).max(1);
+    let width = ((gray.width() as f32 * scale).round() as usize).max(1);
+    let height = ((gray.height() as f32 * scale).round() as usize).max(1);
     f(&resize_gray(gray, width, height))
 }
 

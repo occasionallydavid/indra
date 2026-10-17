@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use burn::prelude::*;
 use burn::tensor::TensorData;
-use image::GrayImage;
 use serde::Deserialize;
 
+use crate::frame::GrayFrame;
 use crate::model::{math_dec_init, math_dec_step, math_enc, mathcls};
 use crate::order::Box4;
 use crate::preprocess::{LineCrop, WIDTH_MULTIPLE, crop_line, pad_batch, width_batches};
@@ -90,7 +90,7 @@ impl MathReader {
 
     pub fn read(
         &mut self,
-        gray: &GrayImage,
+        gray: &GrayFrame,
         boxes: &[Box4],
         batch: usize,
     ) -> Result<Vec<(String, f32)>> {
@@ -243,6 +243,8 @@ mod tests {
         let image = image::open("assets/examples/multi_column.png")
             .unwrap()
             .into_luma8();
+        let (width, height) = (image.width() as usize, image.height() as usize);
+        let image = GrayFrame::from_gray(width, height, image.into_raw());
         let readings = reader
             .read(
                 &image,

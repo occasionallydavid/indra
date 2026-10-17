@@ -76,3 +76,25 @@ The compile-time input folder contains:
   `math_dec_step.onnx`, `math_meta.json`, only when building with `math`
 
 The model version and filenames are pinned in `scripts/download-models.sh`.
+
+## WebAssembly
+
+The `wasm` feature refactors the OCR core to use an internal grayscale frame, so
+the `image` crate is excluded from the WASM dependency graph. The browser decodes
+the selected file with Canvas and passes RGBA pixels to:
+
+```rust
+WebOcr::ocr_rgba(rgba, width, height, run_orientation)
+```
+
+The method returns a JSON string containing Markdown, lines, boxes, layout
+blocks, rotation, and timings.
+
+```shell
+./scripts/download-models.sh models
+./scripts/build-wasm.sh
+python3 -m http.server 8000 -d web
+```
+
+`scripts/build-wasm.sh` accepts optional extra features, for example
+`./scripts/build-wasm.sh cjk,math`.

@@ -48,6 +48,26 @@ recognizer or `math` for the roughly 21 MiB math models.
 
 See [RUST.md](RUST.md) for library usage and implementation details.
 
+## Browser / WebAssembly
+
+The WASM target does not include the `image` crate. JavaScript decodes the file
+with Canvas and passes an RGBA byte buffer to Rust:
+
+```shell
+./scripts/download-models.sh models
+./scripts/build-wasm.sh
+python3 -m http.server 8000 -d web
+```
+
+Open `http://localhost:8000`. CJK or math can be added to the WASM build with:
+
+```shell
+./scripts/build-wasm.sh cjk,math
+```
+
+The wrapper is [web/index.html](web/index.html), and the generated module is
+written to `web/pkg/`.
+
 ## License
 
 The code is Apache-2.0. The model weights have their own license; see the

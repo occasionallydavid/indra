@@ -3,6 +3,7 @@
 //! This crate runs the existing exported ONNX models. It deliberately contains
 //! no model-authoring, loss, target-encoding or training code.
 
+pub mod frame;
 pub mod image_ops;
 pub mod layout;
 #[cfg(feature = "math")]
@@ -12,9 +13,12 @@ pub mod order;
 pub mod pipeline;
 pub mod preprocess;
 pub mod vocab;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
 pub use layout::Block;
 pub use pipeline::{InputError, Line, Ocr, Page, Timing};
 pub use vocab::{Token, Vocab};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub use frame::GrayFrame;
