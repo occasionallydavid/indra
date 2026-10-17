@@ -1,0 +1,17 @@
+{
+  "name": "indra-ocr",
+  "type": "module",
+  "description": "Fast CPU OCR inference for Indra, compiled to native Burn code",
+  "version": "0.6.0",
+  "license": "Apache-2.0",
+  "files": [
+    "indra_ocr_bg.wasm",
+    "indra_ocr.js",
+    "indra_ocr.d.ts"
+  ],
+  "main": "indra_ocr.js",
+  "types": "indra_ocr.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
