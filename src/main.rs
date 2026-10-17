@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use indra_ocr::pipeline::{Ocr, default_model_dir, load_image};
+use indra_ocr::pipeline::{Ocr, load_image};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Format {
@@ -30,14 +30,6 @@ struct Args {
 
     #[arg(long, value_enum, default_value_t = Format::Md)]
     format: Format,
-
-    /// Folder containing det.onnx, rec.onnx and meta.json.
-    #[arg(long)]
-    model_dir: Option<PathBuf>,
-
-    /// ONNX Runtime intra-op threads.
-    #[arg(long, default_value_t = 4)]
-    threads: usize,
 
     /// Recognition lines per batch.
     #[arg(long, default_value_t = 64)]
@@ -78,8 +70,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<usize> {
     let args = Args::parse();
-    let model_dir = args.model_dir.unwrap_or_else(default_model_dir);
-    let mut ocr = Ocr::from_dir(&model_dir, args.threads)?
+    let mut ocr = Ocr::new()?
         .with_batch(args.batch)
         .with_table_heads(args.table_heads);
     if args.math {

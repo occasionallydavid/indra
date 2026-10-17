@@ -1,18 +1,23 @@
 [package]
 name = "indra-ocr"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
-description = "Fast CPU OCR inference for Indra's existing ONNX models"
+description = "Fast CPU OCR inference for Indra, compiled to native Burn code"
 license = "Apache-2.0"
 
 [dependencies]
 anyhow = "1.0"
+burn = { version = "0.22.0", default-features = false, features = ["std", "flex", "simd", "rayon"] }
+burn-store = { version = "0.22.0", default-features = false, features = ["std"] }
 clap = { version = "4.5", features = ["derive"] }
 image = "0.25"
-ort = "=2.0.0-rc.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
+
+[build-dependencies]
+burn-onnx = { version = "0.22.0", default-features = false, features = ["import"] }
+onnx-ir = "0.22.0"
 
 [profile.release]
 lto = "thin"

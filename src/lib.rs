@@ -6,6 +6,7 @@
 pub mod image_ops;
 pub mod layout;
 pub mod math;
+pub mod model;
 pub mod order;
 pub mod pipeline;
 pub mod preprocess;

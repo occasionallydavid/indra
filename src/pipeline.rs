@@ -1,14 +1,11 @@
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+use burn::prelude::*;
+use burn::tensor::{Bool, Int, TensorData};
 use image::GrayImage;
-use ort::environment::Environment;
-use ort::session::Session;
-use ort::session::builder::GraphOptimizationLevel;
-use ort::value::Tensor;
 use serde::Serialize;
 
 use crate::image_ops::{
@@ -16,6 +13,7 @@ use crate::image_ops::{
 };
 use crate::layout::{Block as LayoutBlock, page_blocks, page_markdown};
 use crate::math::{MATH_MIN_CONF, MathReader};
+use crate::model::{det, order as order_model, orient, rec, rec_cjk, script};
 use crate::order::{
     Box4, Layout, N_FEATS, decode_blocks_order, line_features, median, order_xycut,
 };
@@ -90,6 +88,75 @@ impl Recognition {
     }
 }
 
+trait RecModel {
+    fn forward_ocr(
+        &self,
+        x: Tensor<4>,
+        widths: Tensor<1, Int>,
+    ) -> (Tensor<2, Int>, Tensor<2>, Tensor<1, Int>);
+}
+
+impl RecModel for rec::Model {
+    fn forward_ocr(
+        &self,
+        x: Tensor<4>,
+        widths: Tensor<1, Int>,
+    ) -> (Tensor<2, Int>, Tensor<2>, Tensor<1, Int>) {
+        self.forward(x, widths)
+    }
+}
+
+impl RecModel for rec_cjk::Model {
+    fn forward_ocr(
+        &self,
+        x: Tensor<4>,
+        widths: Tensor<1, Int>,
+    ) -> (Tensor<2, Int>, Tensor<2>, Tensor<1, Int>) {
+        self.forward(x, widths)
+    }
+}
+
+fn tensor_f32<const D: usize>(data: Vec<f32>, dims: [usize; D], device: &Device) -> Tensor<D> {
+    Tensor::from_data(TensorData::new(data, dims), device)
+}
+
+fn tensor_int<const D: usize>(data: Vec<i64>, dims: [usize; D], device: &Device) -> Tensor<D, Int> {
+    Tensor::from_data(
+        TensorData::new(data, dims).convert_dtype(burn::tensor::DType::I64),
+        (device, burn::tensor::DType::I64),
+    )
+}
+
+fn tensor_bool<const D: usize>(
+    data: Vec<bool>,
+    dims: [usize; D],
+    device: &Device,
+) -> Tensor<D, Bool> {
+    Tensor::from_data(TensorData::new(data, dims), device)
+}
+
+fn tensor_data_f32<const D: usize>(tensor: Tensor<D>) -> (Vec<f32>, [usize; D]) {
+    let dims = tensor.dims();
+    (tensor.into_data().try_into_vec::<f32>().unwrap(), dims)
+}
+
+fn tensor_data_i64<const D: usize>(tensor: Tensor<D, Int>) -> (Vec<i64>, [usize; D]) {
+    let dims = tensor.dims();
+    let data = tensor.into_data();
+    if data.dtype().is_int() && data.dtype() == burn::tensor::DType::I64 {
+        (data.try_into_vec::<i64>().unwrap(), dims)
+    } else {
+        (
+            data.try_into_vec::<i32>()
+                .unwrap()
+                .into_iter()
+                .map(i64::from)
+                .collect(),
+            dims,
+        )
+    }
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct Meta {
     det_long_side: usize,
@@ -105,18 +172,16 @@ struct Detection {
 }
 
 pub struct Ocr {
-    _environment: Environment,
-    det: Session,
-    rec: Session,
-    script: Option<Session>,
-    rec_cjk: Option<Session>,
-    order: Option<Session>,
-    orient: Option<Session>,
+    device: Device,
+    det: det::Model,
+    rec: rec::Model,
+    script: Option<script::Model>,
+    rec_cjk: Option<rec_cjk::Model>,
+    order: Option<order_model::Model>,
+    orient: Option<orient::Model>,
     vocab: Vocab,
     vocab_cjk: Option<Vocab>,
     math: Option<MathReader>,
-    model_dir: PathBuf,
-    threads: usize,
     det_long_side: usize,
     rec_height: usize,
     adaptive: bool,
@@ -125,16 +190,9 @@ pub struct Ocr {
 }
 
 impl Ocr {
-    pub fn from_dir(model_dir: impl AsRef<Path>, threads: usize) -> Result<Self> {
-        let model_dir = model_dir.as_ref();
-        if !model_dir.is_dir() {
-            bail!("model directory does not exist: {}", model_dir.display());
-        }
-        let meta_path = model_dir.join("meta.json");
-        let meta_text = fs::read_to_string(&meta_path)
-            .with_context(|| format!("could not read {}", meta_path.display()))?;
-        let meta: Meta = serde_json::from_str(&meta_text)
-            .with_context(|| format!("invalid {}", meta_path.display()))?;
+    pub fn new() -> Result<Self> {
+        let meta: Meta = serde_json::from_str(include_str!("../models/meta.json"))
+            .context("invalid meta.json")?;
         let vocab = Vocab::from_json(&meta.vocab).context("invalid main vocabulary")?;
         let vocab_cjk = meta
             .vocab_cjk
@@ -142,46 +200,18 @@ impl Ocr {
             .map(Vocab::from_json)
             .transpose()
             .context("invalid CJK vocabulary")?;
-
-        let rec_path = if model_dir.join("rec.int8.onnx").is_file() {
-            model_dir.join("rec.int8.onnx")
-        } else {
-            model_dir.join("rec.onnx")
-        };
-        let environment = ort::init()
-            .with_name("indra-ocr")
-            .build()
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let det = load_session(&environment, &model_dir.join("det.onnx"), threads)?;
-        let rec = load_session(&environment, &rec_path, threads)?;
-        let orient = load_optional_session(&environment, &model_dir.join("orient.onnx"), threads)?;
-        let order = load_optional_session(&environment, &model_dir.join("order.onnx"), threads)?;
-        let script_path = model_dir.join("script.onnx");
-        let cjk_path = model_dir.join("rec_cjk.onnx");
-        let (script, rec_cjk) = if script_path.is_file() && cjk_path.is_file() {
-            (
-                Some(load_session(&environment, &script_path, threads)?),
-                Some(load_session(&environment, &cjk_path, threads)?),
-            )
-        } else {
-            (None, None)
-        };
-        if rec_cjk.is_some() && vocab_cjk.is_none() {
-            bail!("rec_cjk.onnx is present but meta.json has no vocab_cjk");
-        }
+        let device = Device::default();
         Ok(Self {
-            _environment: environment,
-            det,
-            rec,
-            script,
-            rec_cjk,
-            order,
-            orient,
+            det: det::Model::from_embedded(&device),
+            rec: rec::Model::from_embedded(&device),
+            script: Some(script::Model::from_embedded(&device)),
+            rec_cjk: Some(rec_cjk::Model::from_embedded(&device)),
+            order: Some(order_model::Model::from_embedded(&device)),
+            orient: Some(orient::Model::from_embedded(&device)),
             vocab,
             vocab_cjk,
             math: None,
-            model_dir: model_dir.to_path_buf(),
-            threads,
+            device,
             det_long_side: meta.det_long_side,
             rec_height: meta.rec_height,
             adaptive: true,
@@ -206,13 +236,7 @@ impl Ocr {
     }
 
     pub fn enable_math(&mut self) -> Result<()> {
-        self.math = MathReader::load(&self.model_dir, &self._environment, self.threads)?;
-        if self.math.is_none() {
-            bail!(
-                "--math needs the five math model files in {}",
-                self.model_dir.display()
-            );
-        }
+        self.math = Some(MathReader::load(&self.device)?);
         Ok(())
     }
 
@@ -279,15 +303,13 @@ impl Ocr {
 
     fn detect_at(&mut self, gray: &GrayImage, long_side: usize) -> Result<(Vec<Detection>, f32)> {
         let input = page_to_input(gray, long_side);
-        let tensor = Tensor::from_array((
+        let tensor = tensor_f32(
+            input.data,
             [1_usize, 1, input.height, input.width],
-            input.data.into_boxed_slice(),
-        ))?;
-        let outputs = self.det.run(ort::inputs!["x" => tensor])?;
-        let (shape, output) = outputs[0].try_extract_tensor::<f32>()?;
-        let out_h = shape[2] as usize;
-        let out_w = shape[3] as usize;
-        Ok((decode_detection(output, out_h, out_w), input.scale))
+            &self.device,
+        );
+        let (output, shape) = tensor_data_f32(self.det.forward(tensor));
+        Ok((decode_detection(&output, shape[2], shape[3]), input.scale))
     }
 
     fn recognize(&mut self, gray: &GrayImage, boxes: &[Detection]) -> Result<Vec<Recognition>> {
@@ -300,26 +322,35 @@ impl Ocr {
             return Ok(Vec::new());
         }
         let mut out = vec![Recognition::empty(); crops.len()];
-        let hanzi = if let Some(script) = self.script.as_mut() {
-            Self::hanzi_lines(script, &crops, self.batch)?
+        let hanzi = if let Some(script) = self.script.as_ref() {
+            Self::hanzi_lines(script, &crops, self.batch, &self.device)?
         } else {
             vec![false; crops.len()]
         };
         let non_cjk: Vec<usize> = (0..crops.len()).filter(|&index| !hanzi[index]).collect();
         Self::recognize_group(
-            &mut self.rec,
+            &self.rec,
             &self.vocab,
             false,
             &crops,
             boxes,
             &non_cjk,
             self.batch,
+            &self.device,
             &mut out,
         )?;
-        if let (Some(session), Some(vocab)) = (self.rec_cjk.as_mut(), self.vocab_cjk.as_ref()) {
+        if let (Some(model), Some(vocab)) = (self.rec_cjk.as_ref(), self.vocab_cjk.as_ref()) {
             let cjk: Vec<usize> = (0..crops.len()).filter(|&index| hanzi[index]).collect();
             Self::recognize_group(
-                session, vocab, true, &crops, boxes, &cjk, self.batch, &mut out,
+                model,
+                vocab,
+                true,
+                &crops,
+                boxes,
+                &cjk,
+                self.batch,
+                &self.device,
+                &mut out,
             )?;
         }
         if let Some(math) = self.math.as_mut() {
@@ -349,14 +380,15 @@ impl Ocr {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn recognize_group(
-        session: &mut Session,
+    fn recognize_group<M: RecModel>(
+        model: &M,
         vocab: &Vocab,
         cjk: bool,
         crops: &[crate::preprocess::LineCrop],
         boxes: &[Detection],
         selected: &[usize],
         max_batch: usize,
+        device: &Device,
         out: &mut [Recognition],
     ) -> Result<()> {
         let widths: Vec<usize> = selected.iter().map(|&index| crops[index].width).collect();
@@ -364,17 +396,18 @@ impl Ocr {
             let indices: Vec<usize> = part.iter().map(|&index| selected[index]).collect();
             let lines: Vec<_> = indices.iter().map(|&index| crops[index].clone()).collect();
             let batch = pad_batch(&lines, WIDTH_MULTIPLE);
-            let x = Tensor::from_array((
+            let x = tensor_f32(
+                batch.data,
                 [batch.batch, 1, batch.height, batch.width],
-                batch.data.into_boxed_slice(),
-            ))?;
-            let widths_tensor =
-                Tensor::from_array(([batch.batch], batch.widths.into_boxed_slice()))?;
-            let outputs = session.run(ort::inputs!["x" => x, "widths" => widths_tensor])?;
-            let (ids_shape, ids) = outputs["ids"].try_extract_tensor::<i64>()?;
-            let (_, probabilities) = outputs["conf"].try_extract_tensor::<f32>()?;
-            let (_, lengths) = outputs["lengths"].try_extract_tensor::<i64>()?;
-            let timesteps = ids_shape[1] as usize;
+                device,
+            );
+            let widths_tensor = tensor_int(batch.widths, [batch.batch], device);
+            let (ids_tensor, probabilities_tensor, lengths_tensor) =
+                model.forward_ocr(x, widths_tensor);
+            let (ids, ids_shape) = tensor_data_i64(ids_tensor);
+            let (probabilities, _) = tensor_data_f32(probabilities_tensor);
+            let (lengths, _) = tensor_data_i64(lengths_tensor);
+            let timesteps = ids_shape[1];
             let stride = batch.width as f32 / timesteps.max(1) as f32;
             for (batch_index, &line_index) in indices.iter().enumerate() {
                 let n = lengths[batch_index].max(0) as usize;
@@ -449,23 +482,23 @@ impl Ocr {
     }
 
     fn hanzi_lines(
-        session: &mut Session,
+        model: &script::Model,
         crops: &[crate::preprocess::LineCrop],
         max_batch: usize,
+        device: &Device,
     ) -> Result<Vec<bool>> {
         let mut out = vec![false; crops.len()];
         let widths: Vec<usize> = crops.iter().map(|crop| crop.width).collect();
         for part in width_batches(&widths, max_batch, 1.3, 64, 64 * 640) {
             let lines: Vec<_> = part.iter().map(|&index| crops[index].clone()).collect();
             let batch = pad_batch(&lines, WIDTH_MULTIPLE);
-            let x = Tensor::from_array((
+            let x = tensor_f32(
+                batch.data,
                 [batch.batch, 1, batch.height, batch.width],
-                batch.data.into_boxed_slice(),
-            ))?;
-            let widths_tensor =
-                Tensor::from_array(([batch.batch], batch.widths.into_boxed_slice()))?;
-            let outputs = session.run(ort::inputs!["x" => x, "widths" => widths_tensor])?;
-            let (_, probabilities) = outputs["p"].try_extract_tensor::<f32>()?;
+                device,
+            );
+            let widths_tensor = tensor_int(batch.widths, [batch.batch], device);
+            let (probabilities, _) = tensor_data_f32(model.forward(x, widths_tensor));
             for (local, &index) in part.iter().enumerate() {
                 out[index] = probabilities[local] > 0.5;
             }
@@ -474,18 +507,14 @@ impl Ocr {
     }
 
     fn orientation(&mut self, gray: &GrayImage) -> Result<usize> {
-        let Some(orient) = self.orient.as_mut() else {
+        let Some(orient) = self.orient.as_ref() else {
             return Ok(0);
         };
         let (scaled, width, height) = orient_input(gray);
-        let tensor = Tensor::from_array((
-            [1_usize, 1, ORIENT_SIDE, ORIENT_SIDE],
-            scaled.into_boxed_slice(),
-        ))?;
+        let tensor = tensor_f32(scaled, [1_usize, 1, ORIENT_SIDE, ORIENT_SIDE], &self.device);
         let _ = (width, height);
-        let outputs = orient.run(ort::inputs!["x" => tensor])?;
-        let (_, probabilities) = outputs["p"].try_extract_tensor::<f32>()?;
-        let turn = crate::order::argmax(probabilities);
+        let (probabilities, _) = tensor_data_f32(orient.forward(tensor));
+        let turn = crate::order::argmax(&probabilities);
         Ok(if probabilities[turn] > ORIENT_MIN {
             turn
         } else {
@@ -514,27 +543,26 @@ impl Ocr {
         if boxes.len() < 2 {
             return Ok((order_xycut(boxes), None, None));
         }
-        let Some(order) = self.order.as_mut() else {
+        let Some(order) = self.order.as_ref() else {
             return Ok((order_xycut(boxes), None, None));
         };
         let features = line_features(boxes, page_wh, texts);
-        let feats =
-            Tensor::from_array(([1_usize, boxes.len(), N_FEATS], features.into_boxed_slice()))?;
-        let mask = Tensor::from_array((
+        let feats = tensor_f32(features, [1_usize, boxes.len(), N_FEATS], &self.device);
+        let mask = tensor_bool(
+            vec![true; boxes.len()],
             [1_usize, boxes.len()],
-            vec![true; boxes.len()].into_boxed_slice(),
-        ))?;
-        let outputs = order.run(ort::inputs!["feats" => feats, "mask" => mask])?;
-        let (_, pair_logits) = outputs["a"].try_extract_tensor::<f32>()?;
-        let (_, cls) = outputs["cls"].try_extract_tensor::<f32>()?;
-        let (_, same) = outputs["same"].try_extract_tensor::<f32>()?;
-        let (_, table) = outputs["tab"].try_extract_tensor::<f32>()?;
-        let pair_logits = pair_logits.to_vec();
+            &self.device,
+        );
+        let (pair_logits, cls, same, table) = order.forward(feats, mask);
+        let (pair_logits, _) = tensor_data_f32(pair_logits);
+        let (cls, _) = tensor_data_f32(cls);
+        let (same, _) = tensor_data_f32(same);
+        let (table, _) = tensor_data_f32(table);
         let layout = Layout {
             n: boxes.len(),
-            cls: cls.to_vec(),
-            same: same.to_vec(),
-            table: self.table_heads.then(|| table.to_vec()),
+            cls,
+            same,
+            table: self.table_heads.then_some(table),
         };
         let ordered = decode_blocks_order(&pair_logits, &layout, boxes);
         Ok((ordered, Some(layout), Some(pair_logits)))
@@ -778,39 +806,6 @@ impl Ocr {
     }
 }
 
-fn load_session(environment: &Environment, path: &Path, threads: usize) -> Result<Session> {
-    if !path.is_file() {
-        bail!("missing ONNX model: {}", path.display());
-    }
-    let builder =
-        Session::builder(environment).map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let builder = builder
-        .with_intra_threads(threads.max(1))
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let builder = builder
-        .with_inter_threads(1)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let builder = builder
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let mut builder = builder
-        .with_memory_pattern(false)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    builder
-        .commit_from_file(path)
-        .with_context(|| format!("could not load {}", path.display()))
-}
-
-fn load_optional_session(
-    environment: &Environment,
-    path: &Path,
-    threads: usize,
-) -> Result<Option<Session>> {
-    path.is_file()
-        .then(|| load_session(environment, path, threads))
-        .transpose()
-}
-
 pub fn load_image(path: impl AsRef<Path>) -> Result<GrayImage, InputError> {
     let path = path.as_ref();
     if !path.is_file() {
@@ -824,12 +819,6 @@ pub fn load_image(path: impl AsRef<Path>) -> Result<GrayImage, InputError> {
                 path.display()
             ))
         })
-}
-
-pub fn default_model_dir() -> PathBuf {
-    std::env::var_os("INDRA_OCR_MODEL_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("models"))
 }
 
 fn decode_detection(output: &[f32], height: usize, width: usize) -> Vec<Detection> {
