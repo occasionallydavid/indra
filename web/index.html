@@ -468,6 +468,15 @@
 
     fileInput.addEventListener("change", () => selectFile(fileInput.files[0]));
 
+    document.addEventListener("paste", (event) => {
+      const imageItem = [...(event.clipboardData?.items ?? [])]
+        .find((item) => item.type.startsWith("image/"));
+      const file = imageItem?.getAsFile();
+      if (!file) return;
+      event.preventDefault();
+      selectFile(file);
+    });
+
     for (const eventName of ["dragenter", "dragover"]) {
       drop.addEventListener(eventName, (event) => {
         event.preventDefault();
